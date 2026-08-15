@@ -1,4 +1,4 @@
-from libc.stdint cimport *
+from libc.stdint cimport uint64_t
 
 cdef extern from "plist/plist.h":
     ctypedef void *plist_t

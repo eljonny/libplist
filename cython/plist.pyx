@@ -1,6 +1,11 @@
 cimport cpython
-cimport libc.stdlib
-from libc.stdint cimport *
+cimport libc
+from libc.stdint cimport INT64_MAX
+from libc.stdint cimport int64_t
+from libc.stdint cimport uint8_t, uint32_t, uint64_t
+from libc.stdlib cimport bint
+
+from typing import Any
 
 cdef extern from *:
     ctypedef enum plist_type:
@@ -52,7 +57,7 @@ cdef extern from *:
     void plist_get_data_val(plist_t node, char **val, uint64_t * length)
     void plist_set_data_val(plist_t node, char *val, uint64_t length)
 
-    plist_t plist_new_null();
+    plist_t plist_new_null()
 
     plist_t plist_new_dict()
     int plist_dict_get_size(plist_t node)
@@ -84,7 +89,7 @@ cdef extern from *:
     void plist_from_xml(char *plist_xml, uint32_t length, plist_t * plist)
     void plist_from_bin(char *plist_bin, uint32_t length, plist_t * plist)
 
-    int plist_int_val_is_negative(plist_t node);
+    int plist_int_val_is_negative(plist_t node)
 
 cdef class Node:
     def __init__(self, *args, **kwargs):
@@ -126,7 +131,8 @@ cdef class Node:
             if out != NULL:
                 libc.stdlib.free(out)
 
-    property parent:
+    @property
+    def parent (self) -> Any:
         def __get__(self):
             cdef plist_t c_parent = NULL
             cdef Node node
@@ -147,7 +153,7 @@ cdef class Bool(Node):
         else:
             self._c_node = plist_new_bool(bool(value))
 
-    def __nonzero__(self):
+    def __bool__(self):
         return self.get_value()
 
     def __richcmp__(self, other, op):
@@ -188,7 +194,7 @@ cdef class Integer(Node):
         if value is None:
             self._c_node = plist_new_int(0)
         else:
-            if value < 0 or value <= INT64_MAX:
+            if int(value) < 0 or value <= INT64_MAX:
                 self._c_node = plist_new_int(int(value))
             else:
                 self._c_node = plist_new_uint(int(value))
@@ -554,7 +560,7 @@ cdef Date Date_factory(plist_t c_node, bint managed=True):
 cdef class Data(Node):
     def __cinit__(self, object value=None, *args, **kwargs):
         if value is None:
-            self._c_node = plist_new_data(NULL, 0)
+            self._c_node = plist_new_data(Null, 0)
         else:
             self._c_node = plist_new_data(value, len(value))
 
