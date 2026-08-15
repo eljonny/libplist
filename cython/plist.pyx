@@ -56,7 +56,7 @@ cdef extern from *:
     void plist_get_data_val(plist_t node, char **val, uint64_t * length)
     void plist_set_data_val(plist_t node, char *val, uint64_t length)
 
-    plist_t plist_new_null()
+    plist_t plist_new_null();
 
     plist_t plist_new_dict()
     int plist_dict_get_size(plist_t node)
@@ -88,7 +88,7 @@ cdef extern from *:
     void plist_from_xml(char *plist_xml, uint32_t length, plist_t * plist)
     void plist_from_bin(char *plist_bin, uint32_t length, plist_t * plist)
 
-    int plist_int_val_is_negative(plist_t node)
+    int plist_int_val_is_negative(plist_t node);
 
 cdef class Node:
     def __init__(self, *args, **kwargs):
@@ -130,8 +130,7 @@ cdef class Node:
             if out != NULL:
                 free(out)
 
-    @property
-    def parent (self) -> Any:
+    property parent:
         def __get__(self):
             cdef plist_t c_parent = NULL
             cdef Node node
@@ -193,7 +192,7 @@ cdef class Integer(Node):
         if value is None:
             self._c_node = plist_new_int(0)
         else:
-            if int(value) < 0 or value <= INT64_MAX:
+            if value < 0 or value <= INT64_MAX:
                 self._c_node = plist_new_int(int(value))
             else:
                 self._c_node = plist_new_uint(int(value))
