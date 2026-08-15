@@ -1,9 +1,8 @@
 cimport cpython
-cimport libc
 from libc.stdint cimport INT64_MAX
-from libc.stdint cimport int64_t
+from libc.stdint cimport int32_t, int64_t
 from libc.stdint cimport uint8_t, uint32_t, uint64_t
-from libc.stdlib cimport bint
+from libc.stdlib cimport free
 
 from typing import Any
 
@@ -117,7 +116,7 @@ cdef class Node:
             return cpython.PyUnicode_DecodeUTF8(out, length, 'strict')
         finally:
             if out != NULL:
-                libc.stdlib.free(out)
+                free(out)
 
     cpdef bytes to_bin(self):
         cdef:
@@ -129,7 +128,7 @@ cdef class Node:
             return bytes(out[:length])
         finally:
             if out != NULL:
-                libc.stdlib.free(out)
+                free(out)
 
     @property
     def parent (self) -> Any:
@@ -417,7 +416,7 @@ cdef class Key(Node):
         try:
             return cpython.PyUnicode_DecodeUTF8(c_value, len(c_value), 'strict')
         finally:
-            libc.stdlib.free(c_value)
+            free(c_value)
 
 cdef Key Key_factory(plist_t c_node, bint managed=True):
     cdef Key instance = Key.__new__(Key)
@@ -486,7 +485,7 @@ cdef class String(Node):
         try:
             return cpython.PyUnicode_DecodeUTF8(c_value, len(c_value), 'strict')
         finally:
-            libc.stdlib.free(c_value)
+            free(c_value)
 
 cdef String String_factory(plist_t c_node, bint managed=True):
     cdef String instance = String.__new__(String)
@@ -592,7 +591,7 @@ cdef class Data(Node):
         try:
             return bytes(val[:length])
         finally:
-            libc.stdlib.free(val)
+            free(val)
 
     cpdef set_value(self, object value):
         cdef:
@@ -643,10 +642,10 @@ cdef class Dict(Node):
 
             cpython.PyDict_SetItem(self._map, py_key, plist_t_to_node(subnode, False))
             subnode = NULL
-            libc.stdlib.free(key)
+            free(key)
             key = NULL
             plist_dict_next_item(self._c_node, it, &key, &subnode);
-        libc.stdlib.free(it)
+        free(it)
 
     def __dealloc__(self):
         self._map = None
