@@ -1,10 +1,8 @@
 cimport cpython
 from libc.stdint cimport INT64_MAX
-from libc.stdint cimport int32_t, int64_t
+from libc.stdint cimport int64_t
 from libc.stdint cimport uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport free
-
-from typing import Any
 
 cdef extern from *:
     ctypedef enum plist_type:
@@ -56,7 +54,7 @@ cdef extern from *:
     void plist_get_data_val(plist_t node, char **val, uint64_t * length)
     void plist_set_data_val(plist_t node, char *val, uint64_t length)
 
-    plist_t plist_new_null();
+    plist_t plist_new_null()
 
     plist_t plist_new_dict()
     int plist_dict_get_size(plist_t node)
@@ -88,7 +86,7 @@ cdef extern from *:
     void plist_from_xml(char *plist_xml, uint32_t length, plist_t * plist)
     void plist_from_bin(char *plist_bin, uint32_t length, plist_t * plist)
 
-    int plist_int_val_is_negative(plist_t node);
+    int plist_int_val_is_negative(plist_t node)
 
 cdef class Node:
     def __init__(self, *args, **kwargs):
@@ -130,16 +128,16 @@ cdef class Node:
             if out != NULL:
                 free(out)
 
-    property parent:
-        def __get__(self):
-            cdef plist_t c_parent = NULL
-            cdef Node node
+    @property
+    def parent(self):
+        cdef plist_t c_parent = NULL
+        cdef Node _node
 
-            c_parent = plist_get_parent(self._c_node)
-            if c_parent == NULL:
-                return None
+        c_parent = plist_get_parent(self._c_node)
+        if c_parent == NULL:
+            return None
 
-            return plist_t_to_node(c_parent)
+        return plist_t_to_node(c_parent)
 
     def __str__(self):
         return str(self.get_value())
@@ -236,7 +234,7 @@ cdef class Integer(Node):
             return int(uvalue)
 
     cpdef bint is_negative(self):
-        return plist_int_val_is_negative(self._c_node);
+        return plist_int_val_is_negative(self._c_node)
 
 cdef Integer Integer_factory(plist_t c_node, bint managed=True):
     cdef Integer instance = Integer.__new__(Integer)
@@ -342,7 +340,6 @@ cdef class Null(Node):
         self._c_node = plist_new_null()
 
     def __repr__(self):
-        cdef uint64_t i = self.get_value()
         return '<Null>'
 
 cdef Null Null_factory(plist_t c_node, bint managed=True):
@@ -364,7 +361,7 @@ cdef class Key(Node):
             if isinstance(value, unicode):
                 utf8_data = value.encode('utf-8')
             elif (PY_MAJOR_VERSION < 3) and isinstance(value, str):
-                value.encode('ascii') # trial decode
+                value.encode('ascii')  # trial decode
                 utf8_data = value.encode('ascii')
             else:
                 raise ValueError("Requires unicode input, got %s" % type(value))
@@ -401,7 +398,7 @@ cdef class Key(Node):
             if isinstance(value, unicode):
                 utf8_data = value.encode('utf-8')
             elif (PY_MAJOR_VERSION < 3) and isinstance(value, str):
-                value.encode('ascii') # trial decode
+                value.encode('ascii')  # trial decode
                 utf8_data = value.encode('ascii')
             else:
                 raise ValueError("Requires unicode input, got %s" % type(value))
@@ -434,7 +431,7 @@ cdef class String(Node):
             if isinstance(value, unicode):
                 utf8_data = value.encode('utf-8')
             elif (PY_MAJOR_VERSION < 3) and isinstance(value, str):
-                value.encode('ascii') # trial decode
+                value.encode('ascii')  # trial decode
                 utf8_data = value.encode('ascii')
             else:
                 raise ValueError("Requires unicode input, got %s" % type(value))
@@ -470,7 +467,7 @@ cdef class String(Node):
             if isinstance(value, unicode):
                 utf8_data = value.encode('utf-8')
             elif (PY_MAJOR_VERSION < 3) and isinstance(value, str):
-                value.encode('ascii') # trial decode
+                value.encode('ascii')  # trial decode
                 utf8_data = value.encode('ascii')
             else:
                 raise ValueError("Requires unicode input, got %s" % type(value))
@@ -630,8 +627,8 @@ cdef class Dict(Node):
 
         self._map = cpython.PyDict_New()
 
-        plist_dict_new_iter(self._c_node, &it);
-        plist_dict_next_item(self._c_node, it, &key, &subnode);
+        plist_dict_new_iter(self._c_node, &it)
+        plist_dict_next_item(self._c_node, it, &key, &subnode)
 
         while subnode is not NULL:
             py_key = key
@@ -643,7 +640,7 @@ cdef class Dict(Node):
             subnode = NULL
             free(key)
             key = NULL
-            plist_dict_next_item(self._c_node, it, &key, &subnode);
+            plist_dict_next_item(self._c_node, it, &key, &subnode)
         free(it)
 
     def __dealloc__(self):
@@ -759,19 +756,19 @@ cdef class Array(Node):
             self._array.append(plist_t_to_node(subnode, False))
 
     def __richcmp__(self, other, op):
-        cdef list l = self.get_value()
+        cdef list arrayList = self.get_value()
         if op == 0:
-            return l < other
+            return arrayList < other
         if op == 1:
-            return l <= other
+            return arrayList <= other
         if op == 2:
-            return l == other
+            return arrayList == other
         if op == 3:
-            return l != other
+            return arrayList != other
         if op == 4:
-            return l > other
+            return arrayList > other
         if op == 5:
-            return l >= other
+            return arrayList >= other
 
     def __len__(self):
         return len(self._array)
@@ -843,10 +840,6 @@ cpdef object from_bin(bytes bin):
     return plist_t_to_node(c_node)
 
 cdef plist_t native_to_plist_t(object native):
-    cdef plist_t c_node
-    cdef plist_t child_c_node
-    cdef int32_t secs = 0
-    cdef int32_t usecs = 0
     cdef Node node
     if isinstance(native, Node):
         node = native

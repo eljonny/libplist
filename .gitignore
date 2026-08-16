@@ -61,4 +61,5 @@ cython/Makefile.in
 cython/.deps
 cython/.libs
 cython/plist.c
+cython/plist.html
 test-driver
