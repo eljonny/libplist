@@ -555,7 +555,7 @@ cdef Date Date_factory(plist_t c_node, bint managed=True):
 cdef class Data(Node):
     def __cinit__(self, object value=None, *args, **kwargs):
         if value is None:
-            self._c_node = plist_new_data(Null, 0)
+            self._c_node = plist_new_data(NULL, 0)
         else:
             self._c_node = plist_new_data(value, len(value))
 
@@ -893,7 +893,7 @@ FMT_XML = 1
 FMT_BINARY = 2
 
 cpdef object load(fp, fmt=None, use_builtin_types=True, dict_type=dict):
-    is_binary = fp.read(6) == 'bplist'
+    is_binary = fp.read(6) == b'bplist'
     fp.seek(0)
 
     cdef object cb = None
@@ -921,7 +921,7 @@ cpdef object load(fp, fmt=None, use_builtin_types=True, dict_type=dict):
     return cb(fp.read())
 
 cpdef object loads(data, fmt=None, use_builtin_types=True, dict_type=dict):
-    is_binary = data[0:6] == 'bplist'
+    is_binary = data[0:6] == b'bplist'
 
     cdef object cb = None
 
@@ -946,7 +946,11 @@ cpdef object loads(data, fmt=None, use_builtin_types=True, dict_type=dict):
     return cb(data)
 
 cpdef object dump(value, fp, fmt=FMT_XML, sort_keys=True, skipkeys=False):
-    fp.write(dumps(value, fmt=fmt))
+    plist_dump = dumps(value, fmt=fmt)
+    if fmt == FMT_XML:
+        plist_dump = plist_dump.decode("utf-8")
+
+    fp.write(plist_dump)
 
 cpdef object dumps(value, fmt=FMT_XML, sort_keys=True, skipkeys=False):
     if fmt not in (FMT_XML, FMT_BINARY):
