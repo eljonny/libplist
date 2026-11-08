@@ -349,6 +349,16 @@ plist_t plist_new_node(plist_data_t data)
     return (plist_t) node_create(NULL, data);
 }
 
+/* like plist_new_node(), but takes care of data if the node can't be created */
+static plist_t plist_new_node_or_free(plist_data_t data)
+{
+    plist_t node = plist_new_node(data);
+    if (!node) {
+        plist_free_data(data);
+    }
+    return node;
+}
+
 plist_data_t plist_get_data(plist_t node)
 {
     if (!node)
@@ -428,71 +438,30 @@ static int plist_free_children(node_t root)
 {
     if (!root) return NODE_ERR_INVALID_ARG;
 
-    if (!node_first_child(root)) {
-        return NODE_ERR_SUCCESS;
-    }
-
-    size_t cap = 64, sp = 0;
-    node_t *stack = (node_t*)malloc(cap * sizeof(*stack));
-    if (!stack) return NODE_ERR_NO_MEM;
-
-    // Push *direct* children onto the stack, detached from root.
+    /* Walk down to the deepest first child, free it and step back up.
+     * This needs no extra memory, so freeing can't fail with out-of-memory
+     * (which would leak the whole tree). */
+    node_t cur = root;
     for (;;) {
-        node_t ch = node_first_child(root);
-        if (!ch) break;
-
-        int di = node_detach(root, ch);
-        if (di < 0) {
-            free(stack);
-            return di;
-        }
-
-        if (sp == cap) {
-            cap += 64;
-            node_t *tmp = (node_t*)realloc(stack, cap * sizeof(*stack));
-            if (!tmp) {
-                free(stack);
-                return NODE_ERR_NO_MEM;
-            }
-            stack = tmp;
-        }
-        stack[sp++] = ch;
-    }
-
-    // Now free the detached subtree nodes (and their descendants).
-    while (sp) {
-        node_t node = stack[sp - 1];
-        node_t ch = node_first_child(node);
+        node_t ch = node_first_child(cur);
         if (ch) {
-            int di = node_detach(node, ch);
-            if (di < 0) {
-                free(stack);
-                return di;
-            }
-
-            if (sp == cap) {
-                cap += 64;
-                node_t *tmp = (node_t*)realloc(stack, cap * sizeof(*stack));
-                if (!tmp) {
-                    free(stack);
-                    return NODE_ERR_NO_MEM;
-                }
-                stack = tmp;
-            }
-            stack[sp++] = ch;
+            cur = ch;
             continue;
         }
+        if (cur == root) break;
 
-        plist_data_t data = plist_get_data(node);
+        node_t parent = (node_t)cur->parent;
+        int di = node_detach(parent, cur);
+        if (di < 0) {
+            return di;
+        }
+        plist_data_t data = plist_get_data(cur);
         plist_free_data(data);
-        node->data = NULL;
-
-        node_destroy(node);
-
-        sp--;
+        cur->data = NULL;
+        node_destroy(cur);
+        cur = parent;
     }
 
-    free(stack);
     return NODE_ERR_SUCCESS;
 }
 
@@ -532,7 +501,7 @@ plist_t plist_new_dict(void)
         return NULL;
     }
     data->type = PLIST_DICT;
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_array(void)
@@ -543,7 +512,7 @@ plist_t plist_new_array(void)
         return NULL;
     }
     data->type = PLIST_ARRAY;
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 //These nodes should not be handled by users
@@ -563,7 +532,7 @@ static plist_t plist_new_key(const char *val)
     } else {
         data->length = strlen(val);
     }
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_string(const char *val)
@@ -582,7 +551,7 @@ plist_t plist_new_string(const char *val)
     } else {
         data->length = strlen(val);
     }
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_bool(uint8_t val)
@@ -595,7 +564,7 @@ plist_t plist_new_bool(uint8_t val)
     data->type = PLIST_BOOLEAN;
     data->boolval = val;
     data->length = sizeof(uint8_t);
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_uint(uint64_t val)
@@ -608,7 +577,7 @@ plist_t plist_new_uint(uint64_t val)
     data->type = PLIST_INT;
     data->intval = val;
     data->length = (val > INT_MAX) ? sizeof(uint64_t)*2 : sizeof(uint64_t);
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_int(int64_t val)
@@ -621,7 +590,7 @@ plist_t plist_new_int(int64_t val)
     data->type = PLIST_INT;
     data->intval = val;
     data->length = sizeof(uint64_t);
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_uid(uint64_t val)
@@ -634,7 +603,7 @@ plist_t plist_new_uid(uint64_t val)
     data->type = PLIST_UID;
     data->intval = val;
     data->length = sizeof(uint64_t);
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_real(double val)
@@ -647,7 +616,7 @@ plist_t plist_new_real(double val)
     data->type = PLIST_REAL;
     data->realval = val;
     data->length = sizeof(double);
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_data(const char *val, uint64_t length)
@@ -667,7 +636,7 @@ plist_t plist_new_data(const char *val, uint64_t length)
         memcpy(data->buff, val, length);
     }
     data->length = length;
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_date(int32_t sec, int32_t usec)
@@ -680,7 +649,7 @@ plist_t plist_new_date(int32_t sec, int32_t usec)
     data->type = PLIST_DATE;
     data->realval = (double)sec + (double)usec / 1000000;
     data->length = sizeof(double);
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_unix_date(int64_t sec)
@@ -693,7 +662,7 @@ plist_t plist_new_unix_date(int64_t sec)
     data->type = PLIST_DATE;
     data->realval = (double)sec - MAC_EPOCH;
     data->length = sizeof(double);
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 plist_t plist_new_null(void)
@@ -706,7 +675,7 @@ plist_t plist_new_null(void)
     data->type = PLIST_NULL;
     data->intval = 0;
     data->length = 0;
-    return plist_new_node(data);
+    return plist_new_node_or_free(data);
 }
 
 void plist_free(plist_t plist)
@@ -771,6 +740,7 @@ static int plist_copy_node_shallow(node_t node, plist_t *out_newnode, plist_data
             break;
 
         case PLIST_ARRAY:
+            newdata->hashtable = NULL; // don't share (or free) the original's table on error
             if (data->hashtable) {
                 ptrarray_t* pa = ptr_array_new(((ptrarray_t*)data->hashtable)->capacity);
                 if (!pa) {
@@ -782,6 +752,7 @@ static int plist_copy_node_shallow(node_t node, plist_t *out_newnode, plist_data
             break;
 
         case PLIST_DICT:
+            newdata->hashtable = NULL; // don't share (or free) the original's table on error
             if (data->hashtable) {
                 hashtable_t* ht = hash_table_new(dict_key_hash, dict_key_compare, NULL);
                 if (!ht) {
@@ -909,7 +880,11 @@ static plist_t plist_copy_node(node_t root)
                 if (f->copydata->hashtable && (f->node_index % 2 != 0)) {
                     node_t new_key = node_prev_sibling((node_t)newch);
                     if (new_key) {
-                        hash_table_insert((hashtable_t*)f->copydata->hashtable, new_key->data, newch);
+                        if (hash_table_insert((hashtable_t*)f->copydata->hashtable, new_key->data, newch) < 0) {
+                            /* drop the lookup cache; lookups fall back to a linear search */
+                            hash_table_destroy((hashtable_t*)f->copydata->hashtable);
+                            f->copydata->hashtable = NULL;
+                        }
                     }
                 }
                 break;
@@ -921,6 +896,8 @@ static plist_t plist_copy_node(node_t root)
         f->node_index++;
 
         // push child frame to process its children
+        // (read depth before realloc, which may invalidate f)
+        int child_depth = f->depth + 1;
         if (sp == cap) {
             cap += 64;
             copy_frame_t *tmp = (copy_frame_t*)realloc(st, cap * sizeof(*st));
@@ -940,7 +917,7 @@ static plist_t plist_copy_node(node_t root)
         nf.type = newch_type;
         nf.next_child = node_first_child(ch);
         nf.node_index = 0;
-        nf.depth = f->depth + 1;
+        nf.depth = child_depth;
         st[sp++] = nf;
     }
 
@@ -1327,6 +1304,16 @@ plist_t plist_dict_get_item(plist_t node, const char* key)
     return ret;
 }
 
+/* Drop the key lookup cache of a dict; lookups then fall back to a linear search. */
+static void plist_dict_drop_cache(plist_t node)
+{
+    plist_data_t data = plist_get_data(node);
+    if (data && data->hashtable) {
+        hash_table_destroy((hashtable_t*)data->hashtable);
+        data->hashtable = NULL;
+    }
+}
+
 plist_err_t plist_dict_set_item(plist_t node, const char* key, plist_t item)
 {
     if (!PLIST_IS_DICT(node) || !key || !item) {
@@ -1371,7 +1358,10 @@ plist_err_t plist_dict_set_item(plist_t node, const char* key, plist_t item)
             // rollback: reinsert old value
             int rb = node_insert((node_t)node, (unsigned)idx, old_val);
             if (rb == NODE_ERR_SUCCESS && ht) {
-                hash_table_insert(ht, ((node_t)old_key)->data, old_item);
+                if (hash_table_insert(ht, ((node_t)old_key)->data, old_item) < 0) {
+                    plist_dict_drop_cache(node);
+                    ht = NULL;
+                }
             }
             PLIST_ERR("%s: failed to replace dict value (err=%d)\n", __func__, r);
             return PLIST_ERR_UNKNOWN;
@@ -1380,7 +1370,10 @@ plist_err_t plist_dict_set_item(plist_t node, const char* key, plist_t item)
 
         // update hash table
         if (ht) {
-            hash_table_insert(ht, (plist_data_t)((node_t)key_node)->data, item);
+            if (hash_table_insert(ht, (plist_data_t)((node_t)key_node)->data, item) < 0) {
+                plist_dict_drop_cache(node);
+                ht = NULL;
+            }
         }
 
         // now it’s safe to free old value
@@ -1407,7 +1400,10 @@ plist_err_t plist_dict_set_item(plist_t node, const char* key, plist_t item)
 
         if (ht) {
             // store pointer to item in hash table
-            hash_table_insert(ht, (plist_data_t)((node_t)key_node)->data, item);
+            if (hash_table_insert(ht, (plist_data_t)((node_t)key_node)->data, item) < 0) {
+                plist_dict_drop_cache(node);
+                ht = NULL;
+            }
         } else if (((node_t)node)->count > 500) {
             // make new hash table
             ht = hash_table_new(dict_key_hash, dict_key_compare, NULL);
@@ -1417,7 +1413,10 @@ plist_err_t plist_dict_set_item(plist_t node, const char* key, plist_t item)
                  ht && current;
                  current = (plist_t)node_next_sibling(node_next_sibling((node_t)current)))
             {
-                hash_table_insert(ht, ((node_t)current)->data, node_next_sibling((node_t)current));
+                if (hash_table_insert(ht, ((node_t)current)->data, node_next_sibling((node_t)current)) < 0) {
+                    hash_table_destroy(ht);
+                    ht = NULL;
+                }
             }
             ((plist_data_t)((node_t)node)->data)->hashtable = ht;
         }
@@ -1890,13 +1889,25 @@ void plist_get_date_val(plist_t node, int32_t * sec, int32_t * usec)
         return;
     plist_get_type_and_value(node, &type, (void *) &val, &length);
     assert(length == sizeof(double));
-    if (sec)
-        *sec = (int32_t)val;
-    if (usec)
-    {
-	val = fabs((val - (int64_t)val) * 1000000);
-        *usec = (int32_t)val;
+    /* Inverse of plist_set_date_val (val = sec + usec / 1000000):
+     * whole seconds rounded down, the fraction rounded to microseconds. */
+    if (isnan(val))
+        val = 0;
+    double whole = floor(val);
+    double frac_usec = round((val - whole) * 1000000);
+    if (frac_usec >= 1000000) {
+        whole += 1;
+        frac_usec -= 1000000;
     }
+    /* keep the int32_t conversion defined */
+    if (whole > INT32_MAX)
+        whole = INT32_MAX;
+    else if (whole < INT32_MIN)
+        whole = INT32_MIN;
+    if (sec)
+        *sec = (int32_t)whole;
+    if (usec)
+        *usec = (int32_t)frac_usec;
 }
 
 void plist_get_unix_date_val(plist_t node, int64_t *sec)

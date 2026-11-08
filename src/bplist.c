@@ -223,7 +223,7 @@ static uint64_t UINT_TO_HOST(const void* x, uint8_t n)
 static int uint64_mul_overflow(uint64_t a, uint64_t b, uint64_t *res)
 {
     *res = a * b;
-    return (a > UINT64_MAX / b);
+    return (b != 0 && a > UINT64_MAX / b);
 }
 #endif
 
@@ -237,9 +237,42 @@ struct bplist_data {
     uint8_t offset_size;
     const char* offset_table;
     uint32_t level;
+    uint64_t nodes_parsed;
+    uint64_t max_nodes;
     ptrarray_t* used_indexes;
     plist_err_t err;
 };
+
+/*
+ * Check that len bytes starting at ptr lie within the object area of the
+ * binary plist, i.e. between the start of the data and the offset table.
+ * The check compares lengths instead of computing ptr + len, so it never
+ * forms a pointer outside of the input buffer and cannot wrap around.
+ */
+static int bplist_object_range_valid(const struct bplist_data *bplist, const char *ptr, uint64_t len)
+{
+    if (ptr < bplist->data || ptr > bplist->offset_table) {
+        return 0;
+    }
+    return len <= (uint64_t)(bplist->offset_table - ptr);
+}
+
+/*
+ * Read the object reference at position ref_index of the reference list
+ * that starts at refs. The offset is computed with overflow checking and
+ * validated before the reference is read.
+ */
+static int bplist_read_object_ref(const struct bplist_data *bplist, const char *refs, uint64_t ref_index, uint64_t *ref)
+{
+    uint64_t ref_offset = 0;
+    if (uint64_mul_overflow(ref_index, bplist->ref_size, &ref_offset) ||
+        ref_offset > UINT64_MAX - bplist->ref_size ||
+        !bplist_object_range_valid(bplist, refs, ref_offset + bplist->ref_size)) {
+        return 0;
+    }
+    *ref = UINT_TO_HOST(refs + ref_offset, bplist->ref_size);
+    return 1;
+}
 
 #ifdef DEBUG
 static int plist_bin_debug = 0;
@@ -275,6 +308,16 @@ void plist_bin_set_debug(int debug)
 
 static plist_t parse_bin_node_at_index(struct bplist_data *bplist, uint32_t node_index);
 
+static plist_t bplist_node_new(plist_data_t data)
+{
+    plist_t node = node_create(NULL, data);
+    if (!node) {
+        PLIST_BIN_ERR("%s: failed to create node\n", __func__);
+        plist_free_data(data);
+    }
+    return node;
+}
+
 static plist_t parse_int_node(const char **bnode, uint8_t size)
 {
     plist_data_t data = plist_new_plist_data();
@@ -306,7 +349,7 @@ static plist_t parse_int_node(const char **bnode, uint8_t size)
     (*bnode) += size;
     data->type = PLIST_INT;
 
-    return node_create(NULL, data);
+    return bplist_node_new(data);
 }
 
 static plist_t parse_real_node(const char **bnode, uint8_t size)
@@ -348,12 +391,15 @@ static plist_t parse_real_node(const char **bnode, uint8_t size)
     data->type = PLIST_REAL;
     data->length = sizeof(double);
 
-    return node_create(NULL, data);
+    return bplist_node_new(data);
 }
 
 static plist_t parse_date_node(const char **bnode, uint8_t size)
 {
     plist_t node = parse_real_node(bnode, size);
+    if (!node) {
+        return NULL;
+    }
     plist_data_t data = plist_get_data(node);
 
     data->type = PLIST_DATE;
@@ -380,7 +426,7 @@ static plist_t parse_string_node(const char **bnode, uint64_t size)
     data->strval[size] = '\0';
     data->length = strlen(data->strval);
 
-    return node_create(NULL, data);
+    return bplist_node_new(data);
 }
 
 static char *plist_utf16be_to_utf8(uint16_t *unistr, size_t len, size_t *items_read, size_t *items_written)
@@ -395,7 +441,11 @@ static char *plist_utf16be_to_utf8(uint16_t *unistr, size_t len, size_t *items_r
 	uint32_t w;
 	int read_lead_surrogate = 0;
 
-	/* allocate with enough space */
+	/* allocate with enough space, guarding against integer overflow */
+	if (len > (SIZE_MAX / 4) - 1) {
+		PLIST_BIN_ERR("%s: Input length %" PRIu64 " is too large\n", __func__, (uint64_t)len);
+		return NULL;
+	}
 	outbuf = (char*)malloc(4*(len+1));
 	if (!outbuf) {
 		PLIST_BIN_ERR("%s: Could not allocate %" PRIu64 " bytes\n", __func__, (uint64_t)(4*(len+1)));
@@ -472,7 +522,7 @@ static plist_t parse_unicode_node(const char **bnode, uint64_t size)
     }
     data->length = items_written;
 
-    return node_create(NULL, data);
+    return bplist_node_new(data);
 }
 
 static plist_t parse_data_node(const char **bnode, uint64_t size)
@@ -492,21 +542,18 @@ static plist_t parse_data_node(const char **bnode, uint64_t size)
     }
     memcpy(data->buff, *bnode, sizeof(uint8_t) * size);
 
-    return node_create(NULL, data);
+    return bplist_node_new(data);
 }
 
 static plist_t parse_dict_node(struct bplist_data *bplist, const char** bnode, uint64_t size)
 {
     uint64_t j;
-    uint64_t str_i = 0, str_j = 0;
     uint64_t index1, index2;
     plist_data_t data = plist_new_plist_data();
     if (!data) {
         PLIST_BIN_ERR("%s: failed to allocate plist data\n", __func__);
         return NULL;
     }
-    const char *index1_ptr = NULL;
-    const char *index2_ptr = NULL;
 
     data->type = PLIST_DICT;
     data->length = size;
@@ -519,20 +566,13 @@ static plist_t parse_dict_node(struct bplist_data *bplist, const char** bnode, u
     }
 
     for (j = 0; j < data->length; j++) {
-        str_i = j * bplist->ref_size;
-        str_j = (j + size) * bplist->ref_size;
-        index1_ptr = (*bnode) + str_i;
-        index2_ptr = (*bnode) + str_j;
-
-        if ((index1_ptr < bplist->data || index1_ptr + bplist->ref_size > bplist->offset_table) ||
-            (index2_ptr < bplist->data || index2_ptr + bplist->ref_size > bplist->offset_table)) {
+        /* key references come first, followed by all value references */
+        if (!bplist_read_object_ref(bplist, *bnode, j, &index1) ||
+            !bplist_read_object_ref(bplist, *bnode, j + size, &index2)) {
             plist_free(node);
             PLIST_BIN_ERR("%s: dict entry %" PRIu64 " is outside of valid range\n", __func__, j);
             return NULL;
         }
-
-        index1 = UINT_TO_HOST(index1_ptr, bplist->ref_size);
-        index2 = UINT_TO_HOST(index2_ptr, bplist->ref_size);
 
         if (index1 >= bplist->num_objects) {
             plist_free(node);
@@ -576,8 +616,17 @@ static plist_t parse_dict_node(struct bplist_data *bplist, const char** bnode, u
             return NULL;
         }
 
-        node_attach((node_t)node, (node_t)key);
-        node_attach((node_t)node, (node_t)val);
+        if (node_attach((node_t)node, (node_t)key) != NODE_ERR_SUCCESS) {
+            plist_free(key);
+            plist_free(val);
+            plist_free(node);
+            return NULL;
+        }
+        if (node_attach((node_t)node, (node_t)val) != NODE_ERR_SUCCESS) {
+            plist_free(val);
+            plist_free(node);
+            return NULL;
+        }
     }
 
     return node;
@@ -586,14 +635,12 @@ static plist_t parse_dict_node(struct bplist_data *bplist, const char** bnode, u
 static plist_t parse_array_node(struct bplist_data *bplist, const char** bnode, uint64_t size)
 {
     uint64_t j;
-    uint64_t str_j = 0;
     uint64_t index1;
     plist_data_t data = plist_new_plist_data();
     if (!data) {
         PLIST_BIN_ERR("%s: failed to allocate plist data\n", __func__);
         return NULL;
     }
-    const char *index1_ptr = NULL;
 
     data->type = PLIST_ARRAY;
     data->length = size;
@@ -606,16 +653,11 @@ static plist_t parse_array_node(struct bplist_data *bplist, const char** bnode, 
     }
 
     for (j = 0; j < data->length; j++) {
-        str_j = j * bplist->ref_size;
-        index1_ptr = (*bnode) + str_j;
-
-        if (index1_ptr < bplist->data || index1_ptr + bplist->ref_size > bplist->offset_table) {
+        if (!bplist_read_object_ref(bplist, *bnode, j, &index1)) {
             plist_free(node);
             PLIST_BIN_ERR("%s: array item %" PRIu64 " is outside of valid range\n", __func__, j);
             return NULL;
         }
-
-        index1 = UINT_TO_HOST(index1_ptr, bplist->ref_size);
 
         if (index1 >= bplist->num_objects) {
             plist_free(node);
@@ -630,7 +672,11 @@ static plist_t parse_array_node(struct bplist_data *bplist, const char** bnode, 
             return NULL;
         }
 
-        node_attach((node_t)node, (node_t)val);
+        if (node_attach((node_t)node, (node_t)val) != NODE_ERR_SUCCESS) {
+            plist_free(val);
+            plist_free(node);
+            return NULL;
+        }
     }
 
     return node;
@@ -655,18 +701,22 @@ static plist_t parse_uid_node(const char **bnode, uint8_t size)
     data->type = PLIST_UID;
     data->length = sizeof(uint64_t);
 
-    return node_create(NULL, data);
+    return bplist_node_new(data);
 }
 
 static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
 {
     uint16_t type = 0;
     uint64_t size = 0;
-    uint64_t pobject = 0;
-    uint64_t poffset_table = (uint64_t)(uintptr_t)bplist->offset_table;
+    uint64_t data_size = 0;
 
     if (!object)
         return NULL;
+
+    if (!bplist_object_range_valid(bplist, *object, 1)) {
+        PLIST_BIN_ERR("%s: node marker points outside of valid range\n", __func__);
+        return NULL;
+    }
 
     type = (**object) & BPLIST_MASK;
     size = (**object) & BPLIST_FILL;
@@ -681,6 +731,10 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
         case BPLIST_SET:
         case BPLIST_DICT:
         {
+            if (!bplist_object_range_valid(bplist, *object, 1)) {
+                PLIST_BIN_ERR("%s: size node for node type 0x%02x points outside of valid range\n", __func__, type);
+                return NULL;
+            }
             uint16_t next_size = **object & BPLIST_FILL;
             if ((**object & BPLIST_MASK) != BPLIST_INT) {
                 PLIST_BIN_ERR("%s: invalid size node type for node type 0x%02x: found 0x%02x, expected 0x%02x\n", __func__, type, **object & BPLIST_MASK, BPLIST_INT);
@@ -688,7 +742,7 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
             }
             (*object)++;
             next_size = 1 << next_size;
-            if (*object + next_size > bplist->offset_table) {
+            if (!bplist_object_range_valid(bplist, *object, next_size)) {
                 PLIST_BIN_ERR("%s: size node data bytes for node type 0x%02x point outside of valid range\n", __func__, type);
                 return NULL;
             }
@@ -700,8 +754,6 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
             break;
         }
     }
-
-    pobject = (uint64_t)(uintptr_t)*object;
 
     switch (type)
     {
@@ -720,7 +772,7 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
             data->type = PLIST_BOOLEAN;
             data->boolval = TRUE;
             data->length = 1;
-            return node_create(NULL, data);
+            return bplist_node_new(data);
         }
 
         case BPLIST_FALSE:
@@ -733,7 +785,7 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
             data->type = PLIST_BOOLEAN;
             data->boolval = FALSE;
             data->length = 1;
-            return node_create(NULL, data);
+            return bplist_node_new(data);
         }
 
         case BPLIST_NULL:
@@ -745,7 +797,7 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
             }
             data->type = PLIST_NULL;
             data->length = 0;
-            return node_create(NULL, data);
+            return bplist_node_new(data);
         }
 
         default:
@@ -753,14 +805,14 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
         }
 
     case BPLIST_INT:
-        if (pobject + (uint64_t)(1 << size) > poffset_table) {
+        if (!bplist_object_range_valid(bplist, *object, (uint64_t)1 << size)) {
             PLIST_BIN_ERR("%s: BPLIST_INT data bytes point outside of valid range\n", __func__);
             return NULL;
         }
         return parse_int_node(object, size);
 
     case BPLIST_REAL:
-        if (pobject + (uint64_t)(1 << size) > poffset_table) {
+        if (!bplist_object_range_valid(bplist, *object, (uint64_t)1 << size)) {
             PLIST_BIN_ERR("%s: BPLIST_REAL data bytes point outside of valid range\n", __func__);
             return NULL;
         }
@@ -771,32 +823,32 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
             PLIST_BIN_ERR("%s: invalid data size for BPLIST_DATE node\n", __func__);
             return NULL;
         }
-        if (pobject + (uint64_t)(1 << size) > poffset_table) {
+        if (!bplist_object_range_valid(bplist, *object, (uint64_t)1 << size)) {
             PLIST_BIN_ERR("%s: BPLIST_DATE data bytes point outside of valid range\n", __func__);
             return NULL;
         }
         return parse_date_node(object, size);
 
     case BPLIST_DATA:
-        if (pobject + size < pobject || pobject + size > poffset_table) {
+        if (!bplist_object_range_valid(bplist, *object, size)) {
             PLIST_BIN_ERR("%s: BPLIST_DATA data bytes point outside of valid range\n", __func__);
             return NULL;
         }
         return parse_data_node(object, size);
 
     case BPLIST_STRING:
-        if (pobject + size < pobject || pobject + size > poffset_table) {
+        if (!bplist_object_range_valid(bplist, *object, size)) {
             PLIST_BIN_ERR("%s: BPLIST_STRING data bytes point outside of valid range\n", __func__);
             return NULL;
         }
         return parse_string_node(object, size);
 
     case BPLIST_UNICODE:
-        if (size*2 < size) {
+        if (uint64_mul_overflow(size, sizeof(uint16_t), &data_size)) {
             PLIST_BIN_ERR("%s: Integer overflow when calculating BPLIST_UNICODE data size.\n", __func__);
             return NULL;
         }
-        if (pobject + size*2 < pobject || pobject + size*2 > poffset_table) {
+        if (!bplist_object_range_valid(bplist, *object, data_size)) {
             PLIST_BIN_ERR("%s: BPLIST_UNICODE data bytes point outside of valid range\n", __func__);
             return NULL;
         }
@@ -804,21 +856,25 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
 
     case BPLIST_SET:
     case BPLIST_ARRAY:
-        if (pobject + size < pobject || pobject + size > poffset_table) {
+        /* one object reference per item */
+        if (uint64_mul_overflow(size, bplist->ref_size, &data_size) ||
+            !bplist_object_range_valid(bplist, *object, data_size)) {
             PLIST_BIN_ERR("%s: BPLIST_ARRAY data bytes point outside of valid range\n", __func__);
             return NULL;
         }
         return parse_array_node(bplist, object, size);
 
     case BPLIST_UID:
-        if (pobject + size+1 > poffset_table) {
+        if (!bplist_object_range_valid(bplist, *object, size + 1)) {
             PLIST_BIN_ERR("%s: BPLIST_UID data bytes point outside of valid range\n", __func__);
             return NULL;
         }
         return parse_uid_node(object, size);
 
     case BPLIST_DICT:
-        if (pobject + size < pobject || pobject + size > poffset_table) {
+        /* one key and one value reference per entry */
+        if (uint64_mul_overflow(size, 2 * (uint64_t)bplist->ref_size, &data_size) ||
+            !bplist_object_range_valid(bplist, *object, data_size)) {
             PLIST_BIN_ERR("%s: BPLIST_DICT data bytes point outside of valid range\n", __func__);
             return NULL;
         }
@@ -844,13 +900,14 @@ static plist_t parse_bin_node_at_index(struct bplist_data *bplist, uint32_t node
         return NULL;
     }
 
-    idx_ptr = bplist->offset_table + node_index * bplist->offset_size;
-    if (idx_ptr < bplist->offset_table ||
-        idx_ptr >= bplist->offset_table + bplist->num_objects * bplist->offset_size) {
+    /* num_objects * offset_size was checked against the input size in plist_from_bin() */
+    uint64_t idx_offset = (uint64_t)node_index * bplist->offset_size;
+    if (idx_offset >= bplist->num_objects * bplist->offset_size) {
         PLIST_BIN_ERR("node index %u points outside of valid range\n", node_index);
         bplist->err = PLIST_ERR_PARSE;
         return NULL;
     }
+    idx_ptr = bplist->offset_table + idx_offset;
 
     uint64_t node_offset = UINT_TO_HOST(idx_ptr, bplist->offset_size);
     if (node_offset > (uint64_t)bplist->size) {
@@ -858,10 +915,19 @@ static plist_t parse_bin_node_at_index(struct bplist_data *bplist, uint32_t node
         bplist->err = PLIST_ERR_PARSE;
         return NULL;
     }
-    ptr = bplist->data + node_offset;
     /* make sure the node offset is in a sane range */
-    if ((ptr < bplist->data+BPLIST_MAGIC_SIZE+BPLIST_VERSION_SIZE) || (ptr >= bplist->offset_table)) {
+    if (node_offset < BPLIST_MAGIC_SIZE + BPLIST_VERSION_SIZE ||
+        node_offset >= (uint64_t)(bplist->offset_table - bplist->data)) {
         PLIST_BIN_ERR("offset for node index %u points outside of valid range\n", node_index);
+        bplist->err = PLIST_ERR_PARSE;
+        return NULL;
+    }
+    ptr = bplist->data + node_offset;
+
+    /* Objects can be referenced multiple times, so limit the total number of
+       nodes created to avoid excessive memory use from reference expansion. */
+    if (++bplist->nodes_parsed > bplist->max_nodes) {
+        PLIST_BIN_ERR("too many nodes created while parsing (reference expansion?)\n");
         bplist->err = PLIST_ERR_PARSE;
         return NULL;
     }
@@ -914,7 +980,6 @@ plist_err_t plist_from_bin(const char *plist_bin, uint32_t length, plist_t * pli
     uint64_t root_object = 0;
     const char *offset_table = NULL;
     uint64_t offset_table_size = 0;
-    const char *start_data = NULL;
     const char *end_data = NULL;
 
     if (!plist) {
@@ -941,7 +1006,6 @@ plist_err_t plist_from_bin(const char *plist_bin, uint32_t length, plist_t * pli
         return PLIST_ERR_PARSE;
     }
 
-    start_data = plist_bin + BPLIST_MAGIC_SIZE + BPLIST_VERSION_SIZE;
     end_data = plist_bin + length - sizeof(bplist_trailer_t);
 
     //now parse trailer
@@ -980,7 +1044,7 @@ plist_err_t plist_from_bin(const char *plist_bin, uint32_t length, plist_t * pli
         return PLIST_ERR_PARSE;
     }
 
-    if (offset_table < start_data || offset_table >= end_data) {
+    if (offset_table_offset < BPLIST_MAGIC_SIZE + BPLIST_VERSION_SIZE || offset_table_offset >= max_valid_offset) {
         PLIST_BIN_ERR("offset table offset points outside of valid range\n");
         return PLIST_ERR_PARSE;
     }
@@ -1003,6 +1067,8 @@ plist_err_t plist_from_bin(const char *plist_bin, uint32_t length, plist_t * pli
     bplist.offset_size = offset_size;
     bplist.offset_table = offset_table;
     bplist.level = 0;
+    bplist.nodes_parsed = 0;
+    bplist.max_nodes = num_objects * 16 + 65536;
     bplist.used_indexes = ptr_array_new(16);
     bplist.err = PLIST_ERR_SUCCESS;
 
@@ -1100,13 +1166,18 @@ static plist_err_t serialize_plist(node_t node, void* data, uint32_t depth)
     }
 
     // mark as active
-    hash_table_insert(ser->in_stack, node, (void*)1);
+    if (hash_table_insert(ser->in_stack, node, (void*)1) < 0) {
+        return PLIST_ERR_NO_MEM;
+    }
 
     // insert new ref
     index_val = (uint64_t *) malloc(sizeof(uint64_t));
     if (!index_val) return PLIST_ERR_NO_MEM;
     *index_val = ser->objects->len;
-    hash_table_insert(ser->ref_table, node, index_val);
+    if (hash_table_insert(ser->ref_table, node, index_val) < 0) {
+        free(index_val);
+        return PLIST_ERR_NO_MEM;
+    }
 
     // now append current node to object array
     if (ptr_array_add(ser->objects, node) < 0) {
@@ -1216,6 +1287,10 @@ static uint16_t *plist_utf8_to_utf16be(const unsigned char *unistr, size_t size,
     unsigned char c2;
     unsigned char c3;
 
+    if (size > (SIZE_MAX / sizeof(uint16_t) - 1) / 2) {
+        PLIST_BIN_ERR("%s: Input size %" PRIu64 " is too large\n", __func__, (uint64_t)size);
+        return NULL;
+    }
     outbuf = (uint16_t*)malloc(((size*2)+1)*sizeof(uint16_t));
     if (!outbuf) {
         PLIST_BIN_ERR("%s: Could not allocate %" PRIu64 " bytes\n", __func__, (uint64_t)((size*2)+1)*sizeof(uint16_t));
@@ -1525,6 +1600,9 @@ plist_err_t plist_to_bin(plist_t plist, char **plist_bin, uint32_t * length)
     //write objects and table
     offsets = (uint64_t *) malloc(num_objects * sizeof(uint64_t));
     if (!offsets) {
+        byte_array_free(bplist_buff);
+        ptr_array_free(objects);
+        hash_table_destroy(ref_table);
         return PLIST_ERR_NO_MEM;
     }
     for (i = 0; i < num_objects; i++)
