@@ -96,7 +96,7 @@ cdef class Node:
         if self._c_node is not NULL and self._c_managed:
             plist_free(self._c_node)
 
-    cpdef object __deepcopy__(self, memo={}):
+    cpdef object __deepcopy__(self, memo={}):  # no-cython-lint
         return plist_t_to_node(plist_copy(self._c_node))
 
     cpdef object copy(self):
@@ -668,7 +668,7 @@ cdef class Dict(Node):
         return '<Dict: %s>' % self._map
 
     cpdef dict get_value(self):
-        return dict([(key, value.get_value()) for key, value in self.items()])
+        return dict([(key, value.get_value()) for key, value in self.items()])  # no-cython-lint
 
     cpdef set_value(self, dict value):
         plist_free(self._c_node)
